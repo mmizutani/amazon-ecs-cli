@@ -14,6 +14,7 @@
 package integ
 
 import (
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -40,4 +41,9 @@ func GetCommand(args []string) *exec.Cmd {
 func GetRowValues(row string) []string {
 	spaces := regexp.MustCompile(`\s+`)
 	return strings.Split(spaces.ReplaceAllString(row, " "), " ")
+}
+
+// GetBuildId returns the CodeBuild ID compatible with CloudFormation.
+func GetBuildId() string {
+	return strings.Replace(os.Getenv("CODEBUILD_BUILD_ID"), ":", "-", -1) // replace all occurrences
 }
