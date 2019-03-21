@@ -56,8 +56,8 @@ func TestClusterCreation(t *testing.T) {
 	assertHasCFNStack(t, cfnClient, clusterName)
 	assertHasActiveContainerInstances(t, ecsClient, clusterName)
 
-	// Cleanup the created stack
-	deleteStack(cfnClient, clusterName)
+	// Cleanup the created resources
+	after(cfnClient, ecsClient, clusterName)
 }
 
 // setup initializes all the clients needed by the test.
@@ -99,10 +99,11 @@ func assertHasActiveContainerInstances(t *testing.T, client *ecs.ECS, clusterNam
 		}
 
 		instances, err := client.DescribeContainerInstances(&ecs.DescribeContainerInstancesInput{
+			Cluster:            aws.String(clusterName),
 			ContainerInstances: cluster.ContainerInstanceArns,
 		})
 		if err != nil {
-			t.Log("Unexpected error while describing container instances, retry...")
+			t.Logf("Unexpected error while describing container instances, retry... %v", err)
 			time.Sleep(sleepDurationInBetweenRetriesInS * time.Second)
 			continue
 		}
@@ -125,10 +126,21 @@ func assertHasActiveContainerInstances(t *testing.T, client *ecs.ECS, clusterNam
 		sleepDurationInBetweenRetriesInS*maxNumberOfRetries)
 }
 
-// deleteStack best-effort deletes any resources created by the test.
+// after best-effort deletes any resources created by the test.
+func after(cfnClient *cloudformation.CloudFormation, ecsClient *ecs.ECS, clusterName string) {
+	deleteStack(cfnClient, clusterName)
+	deleteCluster(ecsClient, clusterName)
+}
+
 func deleteStack(client *cloudformation.CloudFormation, clusterName string) {
 	client.DeleteStack(&cloudformation.DeleteStackInput{
 		StackName: aws.String(stackName(clusterName)),
+	})
+}
+
+func deleteCluster(client *ecs.ECS, clusterName string) {
+	client.DeleteCluster(&ecs.DeleteClusterInput{
+		Cluster: aws.String(clusterName),
 	})
 }
 
