@@ -22,7 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
-	"github.com/pkg/errors"
+	"github.com/aws/aws-sdk-go/service/ecs"
 	"github.com/stretchr/testify/assert"
 	"os"
 	"testing"
@@ -30,26 +30,22 @@ import (
 )
 
 const (
-	ecsCLIResourcePrefix = "amazon-ecs-cli-setup-"
+	ecsCLIStackNamePrefix = "amazon-ecs-cli-setup-"
+)
+
+// maxNumberOfRetries * sleepDurationInBetweenRetriesInS represents how long we are willing
+// to wait before we fail a test
+const (
+	maxNumberOfRetries               = 10
+	sleepDurationInBetweenRetriesInS = 30
 )
 
 // TestClusterCreation runs the 'ecs-cli up -c <clusterName> --capability-iam --force' command.
 //
 // If there is no CloudFormation stack created, then the test fails.
 func TestClusterCreation(t *testing.T) {
-	clusterName := fmt.Sprintf("%s-%d", integ.GetBuildId(), time.Now().Unix())
-	cfn, err := newCFNClient()
-	// Fail the test immediately if we won't be able to evaluate it
-	assert.NoError(t, err)
-
-	runTest(t, cfn, clusterName)
-
-	// Cleanup the created stack
-	deleteStack(cfn, clusterName)
-}
-
-func runTest(t *testing.T, cfn *cloudformation.CloudFormation, clusterName string) {
 	// Given
+	cfnClient, ecsClient, clusterName := setup(t)
 	cmd := integ.GetCommand([]string{"up", "-c", clusterName, "--capability-iam", "--force"})
 
 	// When
@@ -57,42 +53,85 @@ func runTest(t *testing.T, cfn *cloudformation.CloudFormation, clusterName strin
 	assert.NoError(t, err, fmt.Sprintf("Error running %v\nStdout: %s", cmd.Args, string(stdout)))
 
 	// Then
-	_, err = getStack(cfn, clusterName)
-	assert.NoError(t, err)
+	assertHasCFNStack(t, cfnClient, clusterName)
+	assertHasActiveContainerInstances(t, ecsClient, clusterName)
+
+	// Cleanup the created stack
+	deleteStack(cfnClient, clusterName)
 }
 
-// newCFNClient initializes the CloudFormation client.
-func newCFNClient() (*cloudformation.CloudFormation, error) {
+// setup initializes all the clients needed by the test.
+func setup(t *testing.T) (cfnClient *cloudformation.CloudFormation, ecsClient *ecs.ECS, clusterName string) {
 	sess, err := session.NewSession()
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create new session")
-	}
-	return cloudformation.New(sess, &aws.Config{
+	// Fail the test immediately if we won't be able to evaluate it
+	assert.NoError(t, err, "failed to create new session")
+
+	conf := &aws.Config{
 		Region: aws.String(os.Getenv("AWS_DEFAULT_REGION")),
-	}), nil
+	}
+	cfnClient = cloudformation.New(sess, conf)
+	ecsClient = ecs.New(sess, conf)
+	clusterName = fmt.Sprintf("%s-%d", integ.GetBuildId(), time.Now().Unix())
+	return
 }
 
-// getStack returns the CloudFormation stack created by the up command.
-func getStack(cfn *cloudformation.CloudFormation, clusterName string) (*cloudformation.Stack, error) {
-	resp, err := cfn.DescribeStacks(&cloudformation.DescribeStacksInput{
+// assertHasCFNStack validates that the CFN stack was created successfully
+func assertHasCFNStack(t *testing.T, client *cloudformation.CloudFormation, clusterName string) {
+	resp, err := client.DescribeStacks(&cloudformation.DescribeStacksInput{
 		StackName: aws.String(stackName(clusterName)),
 	})
-	if err != nil {
-		return nil, errors.Wrap(err, "unexpected cloudformation error")
+	assert.NoError(t, err, "unexpected CloudFormation error during DescribeStacks")
+	assert.NotNil(t, resp.Stacks)
+	assert.Len(t, resp.Stacks, 1)
+	assert.Equal(t, *resp.Stacks[0].StackName, stackName(clusterName))
+}
+
+// assertHasActiveContainerInstances validates that the containers in the cluster are all eventually ACTIVE
+func assertHasActiveContainerInstances(t *testing.T, client *ecs.ECS, clusterName string) {
+	for retryCount := 0; retryCount < maxNumberOfRetries; retryCount++ {
+		cluster, err := client.ListContainerInstances(&ecs.ListContainerInstancesInput{
+			Cluster: aws.String(clusterName),
+		})
+		if err != nil || len(cluster.ContainerInstanceArns) == 0 {
+			t.Log("No available container instances in the cluster, retry...")
+			time.Sleep(sleepDurationInBetweenRetriesInS * time.Second)
+			continue
+		}
+
+		instances, err := client.DescribeContainerInstances(&ecs.DescribeContainerInstancesInput{
+			ContainerInstances: cluster.ContainerInstanceArns,
+		})
+		if err != nil {
+			t.Log("Unexpected error while describing container instances, retry...")
+			time.Sleep(sleepDurationInBetweenRetriesInS * time.Second)
+			continue
+		}
+
+		hasAllInstancesActive := true
+		for _, instance := range instances.ContainerInstances {
+			hasAllInstancesActive = hasAllInstancesActive && *instance.Status == ecs.ContainerInstanceStatusActive
+		}
+
+		// All instances are up, we can exit successfully
+		if hasAllInstancesActive {
+			return
+		}
+		t.Log("Not all instances are active yet, retrying...")
+		time.Sleep(sleepDurationInBetweenRetriesInS * time.Second)
 	}
-	if resp.Stacks == nil || len(resp.Stacks) == 0 {
-		return nil, errors.New(fmt.Sprintf("no stack named '%s' found", stackName(clusterName)))
-	}
-	return resp.Stacks[0], nil
+	assert.FailNow(t, "no active instances in the cluster",
+		"The cluster %s failed to get active instances after %d seconds",
+		clusterName,
+		sleepDurationInBetweenRetriesInS*maxNumberOfRetries)
 }
 
 // deleteStack best-effort deletes any resources created by the test.
-func deleteStack(cfn *cloudformation.CloudFormation, clusterName string) {
-	cfn.DeleteStack(&cloudformation.DeleteStackInput{
+func deleteStack(client *cloudformation.CloudFormation, clusterName string) {
+	client.DeleteStack(&cloudformation.DeleteStackInput{
 		StackName: aws.String(stackName(clusterName)),
 	})
 }
 
 func stackName(clusterName string) string {
-	return ecsCLIResourcePrefix + clusterName
+	return ecsCLIStackNamePrefix + clusterName
 }
