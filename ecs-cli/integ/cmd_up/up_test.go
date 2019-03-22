@@ -24,20 +24,18 @@ import (
 	"github.com/aws/aws-sdk-go/service/cloudformation"
 	"github.com/aws/aws-sdk-go/service/ecs"
 	"github.com/stretchr/testify/assert"
-	"os"
 	"testing"
 	"time"
 )
 
 const (
-	ecsCLIStackNamePrefix = "amazon-ecs-cli-setup-"
-)
-
-// maxNumberOfRetries * sleepDurationInBetweenRetriesInS represents how long we are willing
-// to wait before we fail a test
-const (
+	// maxNumberOfRetries * sleepDurationInBetweenRetriesInS represents how long we are willing
+	// to wait before we fail a test
 	maxNumberOfRetries               = 10
 	sleepDurationInBetweenRetriesInS = 30
+
+	// How long we expect this test to run for at most
+	testTimeoutInMinutes = 15
 )
 
 // TestClusterCreation runs the 'ecs-cli up -c <clusterName> --capability-iam --force' command.
@@ -54,7 +52,7 @@ func TestClusterCreation(t *testing.T) {
 
 	// Then
 	assertHasCFNStack(t, cfnClient, clusterName)
-	assertHasActiveContainerInstances(t, ecsClient, clusterName)
+	assertHasActiveContainerInstances(t, ecsClient, clusterName, 1) // by default we only bring 1 t2.micro instance
 
 	// Cleanup the created resources
 	after(cfnClient, ecsClient, clusterName)
@@ -66,12 +64,10 @@ func setup(t *testing.T) (cfnClient *cloudformation.CloudFormation, ecsClient *e
 	// Fail the test immediately if we won't be able to evaluate it
 	assert.NoError(t, err, "failed to create new session")
 
-	conf := &aws.Config{
-		Region: aws.String(os.Getenv("AWS_DEFAULT_REGION")),
-	}
+	conf := aws.NewConfig()
 	cfnClient = cloudformation.New(sess, conf)
 	ecsClient = ecs.New(sess, conf)
-	clusterName = fmt.Sprintf("%s-%d", integ.GetBuildId(), time.Now().Unix())
+	clusterName = integ.SuggestedResourceName(testTimeoutInMinutes, "TestClusterCreation")
 	return
 }
 
@@ -87,12 +83,12 @@ func assertHasCFNStack(t *testing.T, client *cloudformation.CloudFormation, clus
 }
 
 // assertHasActiveContainerInstances validates that the containers in the cluster are all eventually ACTIVE
-func assertHasActiveContainerInstances(t *testing.T, client *ecs.ECS, clusterName string) {
+func assertHasActiveContainerInstances(t *testing.T, client *ecs.ECS, clusterName string, clusterSize int) {
 	for retryCount := 0; retryCount < maxNumberOfRetries; retryCount++ {
 		cluster, err := client.ListContainerInstances(&ecs.ListContainerInstancesInput{
 			Cluster: aws.String(clusterName),
 		})
-		if err != nil || len(cluster.ContainerInstanceArns) == 0 {
+		if err != nil || len(cluster.ContainerInstanceArns) != clusterSize {
 			t.Log("No available container instances in the cluster, retry...")
 			time.Sleep(sleepDurationInBetweenRetriesInS * time.Second)
 			continue
@@ -145,5 +141,6 @@ func deleteCluster(client *ecs.ECS, clusterName string) {
 }
 
 func stackName(clusterName string) string {
+	const ecsCLIStackNamePrefix = "amazon-ecs-cli-setup-"
 	return ecsCLIStackNamePrefix + clusterName
 }

@@ -14,11 +14,13 @@
 package integ
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const (
@@ -46,4 +48,13 @@ func GetRowValues(row string) []string {
 // GetBuildId returns the CodeBuild ID compatible with CloudFormation.
 func GetBuildId() string {
 	return strings.Replace(os.Getenv("CODEBUILD_BUILD_ID"), ":", "-", -1) // replace all occurrences
+}
+
+// SuggestedResourceName returns a resource name matching the template "{CODEBUILD_BUILD_ID}-{IDENTIFIERS}-{TTL}"
+func SuggestedResourceName(testTimeoutInMinutes int, identifiers ...string) string {
+	ttl := time.Now().Add(time.Duration(testTimeoutInMinutes) * time.Minute).Unix()
+	if len(identifiers) > 0 {
+		return fmt.Sprintf("%s-%s-%d",  GetBuildId(), strings.Join(identifiers, "-"), ttl)
+	}
+	return fmt.Sprintf("%s-%d", GetBuildId(), ttl)
 }
